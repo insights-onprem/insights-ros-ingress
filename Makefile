@@ -4,6 +4,8 @@
 # Variables
 APP_NAME := insights-ros-ingress
 VERSION ?= latest
+IMAGE_REPO ?= quay.io/insights-onprem/$(APP_NAME)
+IMAGE_TAG ?= latest
 IMAGE_NAME := $(APP_NAME):$(VERSION)
 REGISTRY ?= quay.io/insights-onprem
 
@@ -27,10 +29,9 @@ help: ## Display this help message
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z0-9_-]+:.*?## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 .PHONY: clean
-clean: clean-mocks ## Clean build artifacts
+clean: clean-mocks clean-build ## Clean build artifacts
 	@echo "Cleaning build artifacts..."
 	rm -rf $(BUILD_DIR)
-	podman rmi $(IMAGE_NAME) 2>/dev/null || true
 
 .PHONY: deps
 deps: ## Download and verify dependencies
@@ -104,38 +105,60 @@ endif
 	@echo "Binary built: $(BIN_DIR)/$(APP_NAME)"
 
 
-.PHONY: image
-image: ## Build container image using podman
-	@echo "Building container image with podman..."
-	podman build --platform=linux/amd64 -t $(IMAGE_NAME) .
-	@echo "Image built: $(IMAGE_NAME)"
+.PHONY: clean-build
+clean-build: ## Remove Podman images
+	@echo "Cleaning Podman images..."
+	podman rmi $(IMAGE_REPO):$(IMAGE_TAG) 2>/dev/null || true
+	@echo "Podman images cleaned"
 
-.PHONY: image-arm64
-image-arm64: ## Build container image for arm64 architecture
+.PHONY: build-image
+build-image: clean mocks deps ## Build container image and extract binary
+	@echo "Building $(APP_NAME) using containerized approach..."
+	mkdir -p $(BIN_DIR)
+
+	# Build container image
+	podman build --platform=linux/amd64 -t $(IMAGE_REPO):$(IMAGE_TAG) .
+
+	# Extract binary from container
+	@echo "Extracting binary from container..."
+	podman create --name temp-$(APP_NAME) $(IMAGE_REPO):$(IMAGE_TAG)
+	podman cp temp-$(APP_NAME):/$(APP_NAME) $(BIN_DIR)/$(APP_NAME)
+	podman rm temp-$(APP_NAME)
+
+	@echo "Container image built and binary extracted: $(BIN_DIR)/$(APP_NAME)"
+
+.PHONY: build-container
+build-container: ## Build container image only (no binary extraction)
+	@echo "Building container image with podman..."
+	podman build --platform=linux/amd64 -t $(IMAGE_REPO):$(IMAGE_TAG) .
+	@echo "Container image built: $(IMAGE_REPO):$(IMAGE_TAG)"
+
+.PHONY: build-image-arm64
+build-image-arm64: ## Build container image for arm64 architecture
 	@echo "Building container image for arm64..."
 	podman build --platform=linux/arm64 -t $(IMAGE_NAME)-arm64 .
 	@echo "ARM64 image built: $(IMAGE_NAME)-arm64"
 
-.PHONY: image-amd64
-image-amd64: ## Build container image for amd64 architecture
+.PHONY: build-image-amd64
+build-image-amd64: ## Build container image for amd64 architecture
 	@echo "Building container image for amd64..."
 	podman build --platform=linux/amd64 -t $(IMAGE_NAME)-amd64 .
 	@echo "AMD64 image built: $(IMAGE_NAME)-amd64"
 
-.PHONY: image-push
-image-push: image ## Push container image to registry
+.PHONY: build-image-push
+build-image-push: build-container ## Push container image to registry
 	@echo "Pushing image to registry..."
-	podman tag $(IMAGE_NAME) $(REGISTRY)/$(IMAGE_NAME)
-	podman push $(REGISTRY)/$(IMAGE_NAME)
+	podman tag $(IMAGE_REPO):$(IMAGE_TAG) $(IMAGE_REPO):$(IMAGE_TAG)
+	podman push $(IMAGE_REPO):$(IMAGE_TAG)
 
-.PHONY: image-push-arm64
-image-push-arm64: image-arm64 ## Push ARM64 container image to registry
+.PHONY: build-image-push-arm64
+build-image-push-arm64: build-image-arm64 ## Push ARM64 container image to registry
 	@echo "Pushing ARM64 image to registry..."
 	podman tag $(IMAGE_NAME)-arm64 $(REGISTRY)/$(IMAGE_NAME)-arm64
 	podman push $(REGISTRY)/$(IMAGE_NAME)-arm64
 
-.PHONY: image-push-amd64
-image-push-amd64: image-amd64 ## Push AMD64 container image to registry
+.PHONY: build-image-push-amd64
+build-image-push-amd64: build-image-amd64 ## Push AMD64 container image to registry
 	@echo "Pushing AMD64 image to registry..."
 	podman tag $(IMAGE_NAME)-amd64 $(REGISTRY)/$(IMAGE_NAME)-amd64
 	podman push $(REGISTRY)/$(IMAGE_NAME)-amd64
@@ -264,10 +287,10 @@ security-scan: ## Run security scan on container image
 check: fmt vet lint test ## Run all checks (format, vet, lint, test)
 
 .PHONY: ci
-ci: install-tools check build image helm-lint ## Run CI pipeline
+ci: install-tools check build build-container helm-lint ## Run CI pipeline
 
 .PHONY: all
-all: check build image helm-package ## Build everything
+all: check build build-container helm-package ## Build everything
 
 # Development helpers
 .PHONY: watch
@@ -287,7 +310,7 @@ debug: ## Build and run with debugging
 
 # OpenShift deployment helpers
 .PHONY: oc-deploy
-oc-deploy: image helm-package ## Deploy to OpenShift
+oc-deploy: build-container helm-package ## Deploy to OpenShift
 	@echo "Deploying to OpenShift..."
 	oc project insights-ros || oc new-project insights-ros
 	helm upgrade --install $(APP_NAME) deployments/kubernetes/helm/$(APP_NAME) \

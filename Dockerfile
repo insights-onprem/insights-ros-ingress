@@ -6,7 +6,7 @@ WORKDIR /go/src/app
 COPY . .
 USER 0
 RUN go get -d ./... && \
-    go build -o insights-ros-ingress ./cmd/insights-ros-ingress && \
+    go build -mod=mod -o insights-ros-ingress ./cmd/insights-ros-ingress && \
     echo "$(go version)" > go_version_details
 
 FROM registry.access.redhat.com/ubi9/ubi-micro:latest
