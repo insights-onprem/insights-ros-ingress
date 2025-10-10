@@ -31,9 +31,10 @@ func main() {
 	}
 
 	log.WithFields(logrus.Fields{
-		"service": "insights-ros-ingress",
-		"version": "1.0.0",
-		"port":    cfg.Server.Port,
+		"service":      "insights-ros-ingress",
+		"version":      "1.0.0",
+		"main_port":    cfg.Server.Port,
+		"metrics_port": 9090,
 	}).Info("Starting Insights ROS Ingress service")
 
 	// Initialize storage client
@@ -59,12 +60,9 @@ func main() {
 	// Initialize upload handler
 	uploadHandler := upload.NewHandler(cfg, storageClient, messagingClient, log)
 
-	// Setup HTTP routes
+	// Setup main HTTP routes
 	router := chi.NewRouter()
 
-	// OAuth2 authentication for metrics endpoint only
-	authMiddleware := auth.KubernetesAuthMiddleware(log)
-	
 	// API routes - no authentication
 	router.Route("/api/ingress/v1", func(r chi.Router) {
 		r.Post("/upload", uploadHandler.HandleUpload)
@@ -73,11 +71,8 @@ func main() {
 	// Health and observability routes
 	router.Get("/health", healthChecker.Health)
 	router.Get("/ready", healthChecker.Ready)
-	
-	// Metrics endpoint with OAuth2 authentication
-	router.With(authMiddleware).Get("/metrics", healthChecker.Metrics)
 
-	// Create HTTP server
+	// Create main HTTP server
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
 		Handler:      router,
@@ -86,11 +81,35 @@ func main() {
 		IdleTimeout:  time.Duration(cfg.Server.IdleTimeout) * time.Second,
 	}
 
-	// Start server in a goroutine
+	// Setup metrics HTTP routes with OAuth2 authentication
+	authMiddleware := auth.KubernetesAuthMiddleware(log)
+	metricsRouter := chi.NewRouter()
+
+	// Metrics endpoint with OAuth2 authentication
+	metricsRouter.With(authMiddleware).Get("/metrics", healthChecker.Metrics)
+
+	// Create metrics HTTP server on port 9090
+	metricsServer := &http.Server{
+		Addr:         ":9090",
+		Handler:      metricsRouter,
+		ReadTimeout:  time.Duration(cfg.Server.ReadTimeout) * time.Second,
+		WriteTimeout: time.Duration(cfg.Server.WriteTimeout) * time.Second,
+		IdleTimeout:  time.Duration(cfg.Server.IdleTimeout) * time.Second,
+	}
+
+	// Start main server in a goroutine
 	go func() {
-		log.WithField("addr", server.Addr).Info("Starting HTTP server")
+		log.WithField("addr", server.Addr).Info("Starting main HTTP server")
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.WithError(err).Fatal("HTTP server failed")
+			log.WithError(err).Fatal("Main HTTP server failed")
+		}
+	}()
+
+	// Start metrics server in a goroutine
+	go func() {
+		log.WithField("addr", metricsServer.Addr).Info("Starting metrics HTTP server with OAuth2 authentication")
+		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.WithError(err).Fatal("Metrics HTTP server failed")
 		}
 	}()
 
@@ -99,15 +118,37 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Info("Shutting down server...")
+	log.Info("Shutting down servers...")
 
 	// Graceful shutdown with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := server.Shutdown(ctx); err != nil {
-		log.WithError(err).Error("Server forced to shutdown")
+	// Shutdown both servers concurrently
+	shutdownErrs := make(chan error, 2)
+	
+	go func() {
+		if err := server.Shutdown(ctx); err != nil {
+			shutdownErrs <- fmt.Errorf("main server shutdown error: %w", err)
+		} else {
+			shutdownErrs <- nil
+		}
+	}()
+	
+	go func() {
+		if err := metricsServer.Shutdown(ctx); err != nil {
+			shutdownErrs <- fmt.Errorf("metrics server shutdown error: %w", err)
+		} else {
+			shutdownErrs <- nil
+		}
+	}()
+
+	// Wait for both servers to shutdown
+	for i := 0; i < 2; i++ {
+		if err := <-shutdownErrs; err != nil {
+			log.WithError(err).Error("Server forced to shutdown")
+		}
 	}
 
-	log.Info("Server exited")
+	log.Info("All servers exited")
 }
