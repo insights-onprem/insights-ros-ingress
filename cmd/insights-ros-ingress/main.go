@@ -62,17 +62,19 @@ func main() {
 	// Setup HTTP routes
 	router := chi.NewRouter()
 
-	// For now we focus only on authentication, we will add authorization later
+	// OAuth2 authentication for metrics endpoint only
 	authMiddleware := auth.KubernetesAuthMiddleware(log)
-	// API routes
+	
+	// API routes - no authentication
 	router.Route("/api/ingress/v1", func(r chi.Router) {
-		r.Use(authMiddleware)
 		r.Post("/upload", uploadHandler.HandleUpload)
 	})
 
 	// Health and observability routes
 	router.Get("/health", healthChecker.Health)
 	router.Get("/ready", healthChecker.Ready)
+	
+	// Metrics endpoint with OAuth2 authentication
 	router.With(authMiddleware).Get("/metrics", healthChecker.Metrics)
 
 	// Create HTTP server
